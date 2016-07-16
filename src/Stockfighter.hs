@@ -23,7 +23,7 @@ import qualified Network.HTTP.Client.TLS as H
 import qualified Network.HTTP.Client as H
 
 data StockfighterApiKey  = StockfighterApiKey T.Text
-data InstanceId = InstanceId Integer
+data InstanceId = InstanceId Integer deriving (Show, Eq)
 
 data StartLevelResponse = StartLevelResponse {
   ok :: Bool,
@@ -34,7 +34,7 @@ data StartLevelResponse = StartLevelResponse {
   venues :: [String] } deriving (Generic, Show)
 
 data Level = Level {
-  levelInstanceId :: Integer,
+  levelInstanceId :: InstanceId,
   tradingAccount :: String,
   ticker :: String,
   venue :: String
@@ -73,43 +73,64 @@ startLevelRequest k t =
   where
     path = startLevelUrl t
 
-restartLevelUrl :: Level -> T.Text
-restartLevelUrl l = T.concat [gmBaseUrl
-                             , "/instances/"
-                             , instanceId
-                             , "/restart"]
-  where instanceId = iToText $ levelInstanceId l
-
-restartLevelRequest :: StockfighterApiKey -> Level -> Request
-restartLevelRequest k l =
+stopLevelRequest :: StockfighterApiKey -> InstanceId -> Request
+stopLevelRequest k (InstanceId i) =
   gmRequest k "POST" path
   where
-    path = restartLevelUrl l
+    instanceId = iToText i
+    path = T.concat [ gmBaseUrl
+                    , "/instances/"
+                    , instanceId
+                    , "/stop"]
+
+restartLevelUrl :: InstanceId -> T.Text
+restartLevelUrl (InstanceId instanceId) =
+  T.concat [gmBaseUrl
+           , "/instances/"
+           , instanceId'
+           , "/restart"]
+  where instanceId' = iToText instanceId
+
+restartLevelRequest :: StockfighterApiKey -> InstanceId -> Request
+restartLevelRequest k id =
+  gmRequest k "POST" path
+  where
+    path = restartLevelUrl id
 
 setDefaultTimeout :: H.Request -> H.Request
 setDefaultTimeout r =
   r { H.responseTimeout = H.responseTimeoutMicro 120000000 }
 
-restartLevel :: StockfighterApiKey -> Level -> IO (Either JSONException Value)
-restartLevel k l =
-  let request = restartLevelRequest k l in
+executeRequest :: FromJSON a => Request -> IO (Either JSONException a)
+executeRequest request =
   do
     manager <- H.newManager H.tlsManagerSettings
     response <- httpJSONEither (setRequestManager manager
                                 $ setDefaultTimeout request)
     return $ getResponseBody response
 
+toLevel :: StartLevelResponse -> Level
+toLevel a = Level { levelInstanceId = InstanceId $ instanceId a
+                      , tradingAccount = account a
+                      , ticker = head $ tickers a
+                      , venue = head $ venues a }
+
+stopLevel :: StockfighterApiKey -> InstanceId -> IO (Either JSONException Value)
+stopLevel k i =
+  executeRequest $ stopLevelRequest k i
+
+restartLevel :: StockfighterApiKey -> InstanceId -> IO (Either JSONException Level)
+restartLevel k i =
+  do
+    stopLevel k i
+    r <- executeRequest $ restartLevelRequest k i
+    return $ toLevel <$> r
+
 convert :: Either a (IO b) -> IO (Either a b)
 convert = either (return . Left) (fmap Right)
 
 startLevel :: StockfighterApiKey -> T.Text -> IO (Either JSONException Level)
 startLevel k t =
-  let request = startLevelRequest k t in
   do
-    response <- httpJSONEither request
-    return $ toLevel <$> getResponseBody response
-  where
-    toLevel a = Level { levelInstanceId = instanceId a
-                      , tradingAccount = account a
-                      , ticker = head $ tickers a
-                      , venue = head $ venues a }
+    r <- executeRequest $ startLevelRequest k t
+    return $ toLevel <$> r
