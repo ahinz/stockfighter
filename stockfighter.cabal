@@ -23,6 +23,8 @@ library
                        http-conduit ==2.*,
                        bytestring ==0.10.*,
                        text ==1.*,
-                       aeson ==0.11.*
+                       aeson ==0.11.*,
+                       http-client-tls ==0.3.*,
+                       http-client ==0.5.*
   hs-source-dirs:      src
   default-language:    Haskell2010
