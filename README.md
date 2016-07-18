@@ -1,6 +1,6 @@
 # Stockfighter API Client
 
-A Haskell API that can be used for the (Stockfighter)[stockfighter.io]
+A Haskell API that can be used for the [Stockfighter](stockfighter.io)
 game.
 
 ## TODO
@@ -10,7 +10,7 @@ that are on the TODO list to make this actually useful:
 
 * Implement WebSocket API
 * Implement Order Cancellation
-* Use logging a (real logging framework)[http://hackage.haskell.org/package/hslogger-1.2.10/docs/System-Log-Logger.html]
+* Use a [real logging framework](http://hackage.haskell.org/package/hslogger-1.2.10/docs/System-Log-Logger.html)
   instead of `Debug.Trace`
 
 ## Usage
