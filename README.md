@@ -10,6 +10,8 @@ that are on the TODO list to make this actually useful:
 
 * Implement WebSocket API
 * Implement Order Cancellation
+* Use logging a (real logging framework)[http://hackage.haskell.org/package/hslogger-1.2.10/docs/System-Log-Logger.html]
+  instead of `Debug.Trace`
 
 ## Usage
 
@@ -62,4 +64,5 @@ runLevel (StockfighterApiKey apiKey) "first_steps" level1 ()
 ## Weirdness
 
 The project layout is a bit haphazard due to this being my first Haskell
-project and also dealing with record name issues.
+project and also dealing with record name issues (duplicate names not
+being allowed).
