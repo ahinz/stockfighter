@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
 module Stockfighter where
 
@@ -8,8 +9,11 @@ import Stockfighter.Exchange
 import Stockfighter.Data
 import Stockfighter.Http
 
+import qualified Stockfighter.Order as O
+
 import Network.HTTP.Simple
 import Control.Concurrent
+import Control.Applicative
 import Debug.Trace
 
 import qualified Data.Text as T
@@ -51,21 +55,6 @@ defaultLevelState = LevelState { orderBook = Orderbook { bids = Just []
                                , openOrders = []
                                , position = Position { shares = 0
                                                      , cash = 0 }}
-
-
-runLevel :: StockfighterApiKey -> T.Text -> Simulation a -> a -> IO LevelResult
-runLevel key levelName simulation a = do
-  levelOrError <- startLevel key levelName
-  case levelOrError of
-    Right level -> runLevel' key (levelInstanceId level) simulation a
-    Left jsonError -> return $ JsonError jsonError
-
-runLevel' :: StockfighterApiKey -> InstanceId -> Simulation a -> a -> IO LevelResult
-runLevel' k instanceId simFn a = do
-  levelOrError <- restartLevel k instanceId
-  case levelOrError of
-    Right level -> simLevel k level simFn a
-    Left jsonError -> return $ JsonError jsonError
 
 data UpdateEvent = NewOrderBook Orderbook
                  | NewQuote PriceQty
@@ -112,38 +101,54 @@ updatePosition ls filledOrders =
     addShares fills n = n * (sum $ map qty fills)
     addCash fills n = n * (sum $ map cashd fills)
 
-runAction :: Action -> IO FilledOrder
-runAction (PlaceOrder o) =
+runAction :: StockfighterApiKey -> Level -> Action -> IO (Either JSONException FilledOrder)
+runAction k l (PlaceOrder (Order {orderQty, orderType, orderDir, orderPrice})) =
+  createOrder k cro
+  where
+    cro = O.createOrderReq l orderType orderPrice orderQty orderDir
 
-  return $ FilledOrder { order=o, fills = []}
---runAction (CancelOrder o) = return $ FilledOrder { order=o, fills = []}
+runActions :: StockfighterApiKey -> Level -> [Action] -> IO (Either LevelResult [FilledOrder])
+runActions k l actions = do
+  actions' <- processActions actions
+  return $ foldl reducer (Right []) actions'
+  where
+    reducer (Left l) _ = Left l
+    reducer _ (Left j) = Left $ JsonError j
+    reducer (Right fills) (Right fill) = Right (fill : fills)
 
-runActions :: [Action] -> IO [FilledOrder]
-runActions actions =
+    processActions actions = sequence $ map (runAction k l) actions
 
-  return []
-
-actionLoop :: LevelState -> Simulation a -> a -> [Action] -> IO (Either LevelResult LevelState)
-actionLoop initState sim simState actions = do
-  filledOrders <- runActions actions
+applyActions :: StockfighterApiKey -> Level -> LevelState -> Simulation a -> a -> [Action] -> IO (Either LevelResult (LevelState, a))
+applyActions k l initState sim simState actions = do
+  filledOrders <- runActions k l actions
   case filledOrders of
-    [] -> return $ Right initState
-    fills -> case sim levelState event simState of
-      (_, _, True) -> return $ Left Success
-      (newSimState, actions, False) -> actionLoop levelState sim newSimState actions
-      where
-        levelState = updatePosition initState fills
-        event = OrderFilled fills
+    Left l -> return $ Left l
+    Right f -> processFills f
+  where
+    processFills f = case f of
+      [] -> return $ Right (initState, simState)
+      fills -> case sim levelState event simState of
+        (_, _, True) -> return $ Left Success
+        (newSimState, actions, False) -> applyActions k l levelState sim newSimState actions
+        where
+          levelState = updatePosition initState fills
+          event = OrderFilled fills
 
 
-executeLoop :: MVar UpdateEvent -> LevelState -> Simulation a -> a -> IO LevelResult
-executeLoop mv ls s init = do
+executeLoop :: StockfighterApiKey -> Level -> MVar UpdateEvent -> LevelState -> Simulation a -> a -> IO LevelResult
+executeLoop k l mv ls s init = do
   ue <- takeMVar mv
   case updateSim ue of
     Right (_, (_, _, True)) -> return Success
-    Right (newLevelState, (newState, actions, False)) -> executeLoop mv newLevelState s newState
+    Right (newLevelState, (newState, actions, False)) -> do
+      actionsApplied <- actionApplier newLevelState s newState actions
+      case actionsApplied of
+        Left lr -> return lr
+        Right (ls, ss) -> executeLoop k l mv ls s ss
     Left e -> return e
   where
+    actionApplier = applyActions k l
+
     nextLevelState ue = case ue of
       NewOrderBook ob -> Right (ls { orderBook = ob }, OrderBookUpdated)
       NewQuote pq -> Right $ (ls { lastQuote = pq }, QuoteUpdated)
@@ -160,4 +165,43 @@ simLevel k l s a = do
 
   forkIO $ orderbookPollingLoop k l comm
 
-  executeLoop comm defaultLevelState s a
+  executeLoop k l comm defaultLevelState s a
+
+runLevel' :: StockfighterApiKey -> InstanceId -> Simulation a -> a -> IO LevelResult
+runLevel' k instanceId simFn a = do
+  levelOrError <- restartLevel k instanceId
+  case levelOrError of
+    Right level -> simLevel k level simFn a
+    Left jsonError -> return $ JsonError jsonError
+
+runLevel :: StockfighterApiKey -> T.Text -> Simulation a -> a -> IO LevelResult
+runLevel key levelName simulation a = do
+  levelOrError <- startLevel key levelName
+  case levelOrError of
+    Right level -> runLevel' key (levelInstanceId level) simulation a
+    Left jsonError -> return $ JsonError jsonError
+
+
+marketOrder :: Integer -> Order
+marketOrder qty =
+  Order { orderQty = qty
+        , orderPrice = StockPrice 0 -- Ignored for market order
+        , orderType = Market
+        , orderDir = Buy
+        , orderId = Nothing }
+
+level1 :: Simulation ()
+level1 (LevelState {position}) _ _ =
+  if remainingShares > 0 then
+    ((), [PlaceOrder $  marketOrder remainingShares], False)
+  else
+    ((), [], True)
+  where
+    nShares = shares position
+    remainingShares =  100 - nShares
+
+apiKey :: T.Text
+apiKey = "xxx"
+
+-- To run the actual level:
+-- runLevel (StockfighterApiKey apiKey) "first_steps" level1 ()
