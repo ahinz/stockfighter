@@ -5,7 +5,7 @@ module Stockfighter.Data where
 import GHC.Generics
 
 newtype StockPrice = StockPrice Integer
-                   deriving (Show, Eq)
+                   deriving (Show, Eq, Generic)
 
 data Direction = Buy
                | Sell
@@ -18,14 +18,14 @@ data OrderType = Market
                deriving (Show, Eq)
 
 data Fill = Fill { fillPrice :: StockPrice
-                 , fillQty :: Integer
-                 , fillDate :: String }
+                 , fillQty :: Integer }
           deriving (Show, Eq)
 
 newtype OrderId = OrderId Integer
                 deriving (Show, Eq)
 
 data Order = Order { orderQty :: Integer
+                   , orderPrice :: StockPrice
                    , orderType :: OrderType
                    , orderDir :: Direction
                    , orderId :: Maybe OrderId }

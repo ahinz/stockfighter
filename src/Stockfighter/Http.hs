@@ -6,6 +6,8 @@ module Stockfighter.Http where
 import System.Environment
 import Data.Aeson
 
+import Debug.Trace
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as Enc
 
@@ -53,12 +55,13 @@ setDefaultTimeout :: H.Request -> H.Request
 setDefaultTimeout r =
   r { H.responseTimeout = H.responseTimeoutMicro 120000000 }
 
-executeRequest :: FromJSON a => Request -> IO (Either JSONException a)
+executeRequest :: Show a => FromJSON a => Request -> IO (Either JSONException a)
 executeRequest request =
   do
     manager <- H.newManager H.tlsManagerSettings
     response <- httpJSONEither (setRequestManager manager
                                 $ setDefaultTimeout request)
+    traceIO $ show $ getResponseBody response
     return $ getResponseBody response
 
 convert :: Either a (IO b) -> IO (Either a b)

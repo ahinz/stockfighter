@@ -11,6 +11,7 @@ import Network.HTTP.Simple
 
 import Stockfighter.Http
 import qualified Stockfighter.Order as Order
+import qualified Stockfighter.OrderResponse as OrderR
 import qualified Stockfighter.Gamemaster as GM
 import qualified Stockfighter.Data as D
 
@@ -41,7 +42,6 @@ venueHeartbeat k v =
     path =  T.concat [apiBaseUrl, "/venues/", T.pack v, "/heartbeat"]
 
 instance FromJSON D.Orderbook
-instance FromJSON D.PriceQty
 
 orderbook :: StockfighterApiKey -> String -> String -> IO (Either JSONException D.Orderbook)
 orderbook k venue symbol =
@@ -49,9 +49,10 @@ orderbook k venue symbol =
   where
     path =  T.concat [apiBaseUrl, "/venues/", T.pack venue, "/stocks/", T.pack symbol]
 
-createOrder :: StockfighterApiKey -> Order.CreateOrderRequest -> IO (Either JSONException Value)
-createOrder k o =
-  executeRequest $ setRequestBodyJSON o $ apiRequest k "POST" path
+createOrder :: StockfighterApiKey -> Order.CreateOrderRequest -> IO (Either JSONException D.FilledOrder)
+createOrder k o = do
+  r <- executeRequest $ setRequestBodyJSON o $ apiRequest k "POST" path
+  return $ OrderR.toRegularOrder <$> r
   where
     symbol = T.pack $ Order.stock o
     venue = T.pack $ Order.venue o
