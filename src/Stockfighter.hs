@@ -1,136 +1,163 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 
--- https://discuss.starfighters.io/t/the-gm-api-how-to-start-stop-restart-resume-trading-levels-automagically/143
-
 module Stockfighter where
 
-import GHC.Generics
-
-import System.Environment
-import Data.Aeson
-
-import Control.Applicative
-
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as Enc
-
-import qualified Data.ByteString.Char8 as S8
-import qualified Data.ByteString.Lazy.Char8 as L8
+import Stockfighter.Gamemaster
+import Stockfighter.Exchange
+import Stockfighter.Data
+import Stockfighter.Http
 
 import Network.HTTP.Simple
-import qualified Network.HTTP.Client.TLS as H
-import qualified Network.HTTP.Client as H
+import Control.Concurrent
+import Debug.Trace
 
-data StockfighterApiKey  = StockfighterApiKey T.Text
-data InstanceId = InstanceId Integer deriving (Show, Eq)
+import qualified Data.Text as T
 
-data StartLevelResponse = StartLevelResponse {
-  ok :: Bool,
-  instanceId :: Integer,
-  secondsPerTradingDay :: Double,
-  account :: String,
-  tickers :: [String],
-  venues :: [String] } deriving (Generic, Show)
+data OrderBookDelta = OrderBookDelta { newBids :: [PriceQty]
+                                     , newAsks :: [PriceQty] }
+                    deriving (Show, Eq)
 
-data Level = Level {
-  levelInstanceId :: InstanceId,
-  tradingAccount :: String,
-  ticker :: String,
-  venue :: String
-  } deriving (Show, Eq)
+data Event = InitEvent
+           | OrderFilled [FilledOrder]
+           | QuoteUpdated
+           | OrderBookUpdated
 
-instance FromJSON StartLevelResponse
+data Action = PlaceOrder Order
+            | CancelOrder OrderId
+            deriving (Show, Eq)
 
-gmHost = "www.stockfighter.io"
-gmBaseUrl = "/gm"
+data Position = Position { shares :: Integer
+                         , cash :: Integer }
+              deriving (Show, Eq)
 
-iToText :: Integer -> T.Text
-iToText = T.pack . show
+data LevelState = LevelState { orderBook :: Orderbook
+                             , lastQuote :: PriceQty
+                             , openOrders :: [FilledOrder]
+                             , position :: Position }
+                deriving (Show, Eq)
 
-startLevelUrl :: T.Text -> T.Text
-startLevelUrl level = T.concat [gmBaseUrl, "/levels/", level]
+type Simulation a = LevelState -> Event -> a -> (a, [Action], Bool)
 
-baseRequest :: StockfighterApiKey -> S8.ByteString -> T.Text -> Request
-baseRequest (StockfighterApiKey k) method path =
-  setRequestPath path'
-  $ setRequestMethod method
-  $ setRequestSecure True
-  $ setRequestPort 443
-  $ setRequestHeader "Cookie" [cookie]
-  $ defaultRequest
+data LevelResult = JsonError JSONException
+                 | Success
+                 deriving Show
+
+defaultLevelState :: LevelState
+defaultLevelState = LevelState { orderBook = Orderbook { bids = Just []
+                                                       , asks = Just [] }
+                               , lastQuote = PriceQty { price = 0
+                                                      , qty = 0 }
+                               , openOrders = []
+                               , position = Position { shares = 0
+                                                     , cash = 0 }}
+
+
+runLevel :: StockfighterApiKey -> T.Text -> Simulation a -> a -> IO LevelResult
+runLevel key levelName simulation a = do
+  levelOrError <- startLevel key levelName
+  case levelOrError of
+    Right level -> runLevel' key (levelInstanceId level) simulation a
+    Left jsonError -> return $ JsonError jsonError
+
+runLevel' :: StockfighterApiKey -> InstanceId -> Simulation a -> a -> IO LevelResult
+runLevel' k instanceId simFn a = do
+  levelOrError <- restartLevel k instanceId
+  case levelOrError of
+    Right level -> simLevel k level simFn a
+    Left jsonError -> return $ JsonError jsonError
+
+data UpdateEvent = NewOrderBook Orderbook
+                 | NewQuote PriceQty
+                 | ApiError JSONException
+                 deriving Show
+
+orderbookPollingLoop :: StockfighterApiKey -> Level -> MVar UpdateEvent -> IO ()
+orderbookPollingLoop k l mv = do
+  ob <- orderbook k (levelVenue l) (ticker l)
+
+  putMVar mv $ case ob of
+    Right orderBook -> NewOrderBook orderBook
+    Left jsonError -> ApiError jsonError
+
+  threadDelay 1000
+  orderbookPollingLoop k l mv
+
+updatePosition :: LevelState -> [FilledOrder] -> LevelState
+updatePosition ls filledOrders =
+  case (position ls, sumDeltas $ map toDelta filledOrders) of
+     (p, delta) -> ls { position = addToPosition p delta }
+
   where
-    cookie = Enc.encodeUtf8 $ T.concat ["api_key=", k]
-    path' = Enc.encodeUtf8 path
+    orderToFills fo = (orderDir $ order fo, fills fo)
+    toDelta fo = case orderToFills fo of
+      (Buy, fills) -> (addShares fills 1,
+                       addCash fills (-1))
+      (Sell, fills) -> (addShares fills (-1),
+                        addCash fills 1)
 
-gmRequest :: StockfighterApiKey -> S8.ByteString -> T.Text -> Request
-gmRequest k m p =
-  setRequestHost gmHost $ baseRequest k m p
+    sumDelta (s1, p1) (s2, p2) = (s1 + s2, p1 + p2)
+    sumDeltas = foldl sumDelta (0, 0)
 
-startLevelRequest :: StockfighterApiKey -> T.Text -> Request
-startLevelRequest k t =
-  gmRequest k "POST" path
+    addToPosition p (shareDelta, cashDelta) =
+      Position { shares = (shares p) + shareDelta
+               , cash = (cash p) + cashDelta}
+
+    sum = foldl (+) 0
+    qty = fillQty
+    price f = case fillPrice f of
+      StockPrice p -> p
+    cashd f = (qty f) * (price f)
+
+    addShares fills n = n * (sum $ map qty fills)
+    addCash fills n = n * (sum $ map cashd fills)
+
+runAction :: Action -> IO FilledOrder
+runAction (PlaceOrder o) =
+
+  return $ FilledOrder { order=o, fills = []}
+--runAction (CancelOrder o) = return $ FilledOrder { order=o, fills = []}
+
+runActions :: [Action] -> IO [FilledOrder]
+runActions actions =
+
+  return []
+
+actionLoop :: LevelState -> Simulation a -> a -> [Action] -> IO (Either LevelResult LevelState)
+actionLoop initState sim simState actions = do
+  filledOrders <- runActions actions
+  case filledOrders of
+    [] -> return $ Right initState
+    fills -> case sim levelState event simState of
+      (_, _, True) -> return $ Left Success
+      (newSimState, actions, False) -> actionLoop levelState sim newSimState actions
+      where
+        levelState = updatePosition initState fills
+        event = OrderFilled fills
+
+
+executeLoop :: MVar UpdateEvent -> LevelState -> Simulation a -> a -> IO LevelResult
+executeLoop mv ls s init = do
+  ue <- takeMVar mv
+  case updateSim ue of
+    Right (_, (_, _, True)) -> return Success
+    Right (newLevelState, (newState, actions, False)) -> executeLoop mv newLevelState s newState
+    Left e -> return e
   where
-    path = startLevelUrl t
+    nextLevelState ue = case ue of
+      NewOrderBook ob -> Right (ls { orderBook = ob }, OrderBookUpdated)
+      NewQuote pq -> Right $ (ls { lastQuote = pq }, QuoteUpdated)
+      ApiError er -> Left $ JsonError er
 
-stopLevelRequest :: StockfighterApiKey -> InstanceId -> Request
-stopLevelRequest k (InstanceId i) =
-  gmRequest k "POST" path
-  where
-    instanceId = iToText i
-    path = T.concat [ gmBaseUrl
-                    , "/instances/"
-                    , instanceId
-                    , "/stop"]
+    updateSim ue = case nextLevelState ue of
+      Right (levelState, event) -> Right $ (levelState, s levelState event init)
+      Left a -> Left a
 
-restartLevelUrl :: InstanceId -> T.Text
-restartLevelUrl (InstanceId instanceId) =
-  T.concat [gmBaseUrl
-           , "/instances/"
-           , instanceId'
-           , "/restart"]
-  where instanceId' = iToText instanceId
 
-restartLevelRequest :: StockfighterApiKey -> InstanceId -> Request
-restartLevelRequest k id =
-  gmRequest k "POST" path
-  where
-    path = restartLevelUrl id
+simLevel :: StockfighterApiKey -> Level -> Simulation a -> a -> IO LevelResult
+simLevel k l s a = do
+  comm <- newEmptyMVar
 
-setDefaultTimeout :: H.Request -> H.Request
-setDefaultTimeout r =
-  r { H.responseTimeout = H.responseTimeoutMicro 120000000 }
+  forkIO $ orderbookPollingLoop k l comm
 
-executeRequest :: FromJSON a => Request -> IO (Either JSONException a)
-executeRequest request =
-  do
-    manager <- H.newManager H.tlsManagerSettings
-    response <- httpJSONEither (setRequestManager manager
-                                $ setDefaultTimeout request)
-    return $ getResponseBody response
-
-toLevel :: StartLevelResponse -> Level
-toLevel a = Level { levelInstanceId = InstanceId $ instanceId a
-                      , tradingAccount = account a
-                      , ticker = head $ tickers a
-                      , venue = head $ venues a }
-
-stopLevel :: StockfighterApiKey -> InstanceId -> IO (Either JSONException Value)
-stopLevel k i =
-  executeRequest $ stopLevelRequest k i
-
-restartLevel :: StockfighterApiKey -> InstanceId -> IO (Either JSONException Level)
-restartLevel k i =
-  do
-    stopLevel k i
-    r <- executeRequest $ restartLevelRequest k i
-    return $ toLevel <$> r
-
-convert :: Either a (IO b) -> IO (Either a b)
-convert = either (return . Left) (fmap Right)
-
-startLevel :: StockfighterApiKey -> T.Text -> IO (Either JSONException Level)
-startLevel k t =
-  do
-    r <- executeRequest $ startLevelRequest k t
-    return $ toLevel <$> r
+  executeLoop comm defaultLevelState s a
